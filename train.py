@@ -1,4 +1,5 @@
 import pdb
+import time
 import visdom
 import argparse
 import numpy as np
@@ -141,10 +142,8 @@ def train_shared_cnn(epoch,
     train_acc_meter = AverageMeter()
     loss_meter = AverageMeter()
 
-    progress_bar = tqdm(train_loader)
-    for (images, labels) in progress_bar:
-        progress_bar.set_description('Epoch ' + str(epoch))
-
+    for i, (images, labels) in enumerate(train_loader):
+        start = time.time()
         images = images.cuda()
         labels = labels.cuda()
 
@@ -179,7 +178,7 @@ def train_shared_cnn(epoch,
         pred = shared_cnn(images, sample_arc)
         loss = nn.CrossEntropyLoss()(pred, labels)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(shared_cnn.parameters(), args.child_grad_bound)
+        grad_norm = torch.nn.utils.clip_grad_norm_(shared_cnn.parameters(), args.child_grad_bound)
         shared_cnn_optimizer.step()
 
         train_acc = torch.mean((torch.max(pred, 1)[1] == labels).type(torch.float))
@@ -187,9 +186,18 @@ def train_shared_cnn(epoch,
         train_acc_meter.update(train_acc.item())
         loss_meter.update(loss.item())
 
-        progress_bar.set_postfix(
-            train_acc='%.3f' % train_acc_meter.avg,
-            loss='%.3f' % loss_meter.avg)
+        end = time.time()
+
+        if (i) % args.log_every == 0:
+            learning_rate = shared_cnn_optimizer.param_groups[0]['lr']
+            display = 'epoch=' + str(epoch) + \
+                      '\tch_step=' + str(i) + \
+                      '\tloss=%.6f' % (loss_meter.val) + \
+                      '\tlr=%.4f' % (learning_rate) + \
+                      '\t|g|=%.4f' % (grad_norm.item()) + \
+                      '\tacc=%.4f' % (train_acc_meter.val) + \
+                      '\ttime=%.2fit/s' % (1. / (end - start))
+            print(display)
 
     vis_win['shared_cnn_acc'] = vis.line(
         X=np.array([epoch]),
@@ -435,7 +443,8 @@ def main():
                                     controller_optimizer,
                                     baseline)
 
-        evaluate_model(epoch, controller, shared_cnn, data_loaders)
+        if epoch % args.eval_every_epochs == 0:
+            evaluate_model(epoch, controller, shared_cnn, data_loaders)
 
         shared_cnn_scheduler.step(epoch)
 

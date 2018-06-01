@@ -1,4 +1,5 @@
 import pdb
+import sys
 import time
 import visdom
 import argparse
@@ -22,7 +23,7 @@ parser = argparse.ArgumentParser(description='ENAS')
 
 parser.add_argument('--search_for', default='macro', choices=['macro'])
 parser.add_argument('--data_path', default='/export/mlrg/terrance/Projects/data/', type=str)
-parser.add_argument('--output_filename', default='ENAS2', type=str)
+parser.add_argument('--output_filename', default='ENAS1', type=str)
 parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--num_epochs', type=int, default=310)
 parser.add_argument('--log_every', type=int, default=50)
@@ -60,6 +61,7 @@ vis.env = 'ENAS_' + args.output_filename
 vis_win = {'shared_cnn_acc': None, 'shared_cnn_loss': None, 'controller_reward': None,
            'controller_acc': None, 'controller_loss': None}
 
+# sys.stdout = open('logs/' + args.output_filename + '.log', 'w')
 # cudnn.benchmark = True  # TODO: test to see if this actually makes things go faster
 
 
@@ -225,6 +227,7 @@ def train_controller(epoch,
     '''
     https://github.com/melodyguan/enas/blob/master/src/cifar10/general_controller.py#L270
     '''
+    print('Epoch ' + str(epoch) + ': Training controller')
 
     global vis_win
 
@@ -236,12 +239,10 @@ def train_controller(epoch,
     val_acc_meter = AverageMeter()
     loss_meter = AverageMeter()
 
-    progress_bar = trange(args.controller_train_steps * args.controller_num_aggregate)
     controller.zero_grad()
-    for i in progress_bar:
-        progress_bar.set_description('Epoch ' + str(epoch))
+    for i in range(args.controller_train_steps * args.controller_num_aggregate):
+        start = time.time()
         images, labels = next(iter(valid_loader))
-
         images = images.cuda()
         labels = labels.cuda()
 
@@ -271,21 +272,30 @@ def train_controller(epoch,
 
         loss.backward(retain_graph=True)
 
-        # Aggregate gradients for controller_num_aggregate iterationa, then update weights
-        if (i + 1) % args.controller_num_aggregate == 0:
-            controller_optimizer.step()
-            controller.zero_grad()
-
         reward_meter.update(reward.item())
         baseline_meter.update(baseline.item())
         val_acc_meter.update(batch_val_acc.item())
         loss_meter.update(loss.item())
 
-        progress_bar.set_postfix(
-            reward='%.3f' % reward_meter.avg,
-            baseline='%.3f' % baseline_meter.avg,
-            val_acc='%.3f' % val_acc_meter.avg,
-            loss='%.3f' % loss_meter.avg)
+        end = time.time()
+
+        # Aggregate gradients for controller_num_aggregate iterationa, then update weights
+        if (i + 1) % args.controller_num_aggregate == 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(controller.parameters(), args.child_grad_bound)
+            controller_optimizer.step()
+            controller.zero_grad()
+
+            if (i + 1) % (2 * args.controller_num_aggregate) == 0:
+                learning_rate = controller_optimizer.param_groups[0]['lr']
+                display = 'ctrl_step=' + str(i // args.controller_num_aggregate) + \
+                          '\tloss=%.3f' % (loss_meter.val) + \
+                          '\tent=%.2f' % (controller.sample_entropy.item()) + \
+                          '\tlr=%.4f' % (learning_rate) + \
+                          '\t|g|=%.4f' % (grad_norm.item()) + \
+                          '\tacc=%.4f' % (val_acc_meter.val) + \
+                          '\tbl=%.2f' % (baseline_meter.val) + \
+                          '\ttime=%.2fit/s' % (1. / (end - start))
+                print(display)
 
     vis_win['controller_reward'] = vis.line(
         X=np.column_stack([epoch] * 2),

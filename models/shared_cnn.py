@@ -32,7 +32,7 @@ class FactorizedReduction(nn.Module):
         if stride == 1:
             self.fr = nn.Sequential(
                 nn.Conv2d(in_planes, out_planes, kernel_size=1, bias=False),
-                nn.BatchNorm2d(out_planes, affine=False, track_running_stats=False))
+                nn.BatchNorm2d(out_planes, track_running_stats=False))
         else:
             self.path1 = nn.Sequential(
                 nn.AvgPool2d(1, stride=stride),
@@ -41,7 +41,7 @@ class FactorizedReduction(nn.Module):
             self.path2 = nn.Sequential(
                 nn.AvgPool2d(1, stride=stride),
                 nn.Conv2d(in_planes, out_planes // 2, kernel_size=1, bias=False))
-            self.bn = nn.BatchNorm2d(out_planes, affine=False, track_running_stats=False)
+            self.bn = nn.BatchNorm2d(out_planes, track_running_stats=False)
 
     def forward(self, x):
         if self.stride == 1:
@@ -77,7 +77,7 @@ class ENASLayer(nn.Module):
         self.branch_4 = PoolBranch(in_planes, out_planes, 'avg')
         self.branch_5 = PoolBranch(in_planes, out_planes, 'max')
 
-        self.bn = nn.BatchNorm2d(out_planes, affine=False, track_running_stats=False)
+        self.bn = nn.BatchNorm2d(out_planes, track_running_stats=False)
 
     def forward(self, x, prev_layers, sample_arc):
         # sample_arc is a list, where the first value is for the layer type
@@ -130,13 +130,13 @@ class ConvBranch(nn.Module):
 
         self.inp_conv1 = nn.Sequential(
             nn.Conv2d(in_planes, out_planes, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_planes, affine=False, track_running_stats=False),
+            nn.BatchNorm2d(out_planes, track_running_stats=False),
             nn.ReLU())
 
         self.out_conv = nn.Sequential(
             nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size,
                       padding=self.padding, groups=self.groups, bias=False),
-            nn.BatchNorm2d(out_planes, affine=False, track_running_stats=False),
+            nn.BatchNorm2d(out_planes, track_running_stats=False),
             nn.ReLU())
 
     def forward(self, x):
@@ -158,7 +158,7 @@ class PoolBranch(nn.Module):
 
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_planes, out_planes, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_planes, affine=False, track_running_stats=False),
+            nn.BatchNorm2d(out_planes, track_running_stats=False),
             nn.ReLU())
 
         if avg_or_max == 'avg':
@@ -194,7 +194,7 @@ class SharedCNN(nn.Module):
 
         self.stem_conv = nn.Sequential(
             nn.Conv2d(3, out_filters, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_filters, affine=False, track_running_stats=False))
+            nn.BatchNorm2d(out_filters, track_running_stats=False))
 
         self.layers = nn.ModuleList([])
         self.pooled_layers = nn.ModuleList([])

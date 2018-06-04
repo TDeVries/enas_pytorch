@@ -1,4 +1,5 @@
 import pdb
+import os
 import sys
 import time
 import visdom
@@ -23,12 +24,14 @@ parser = argparse.ArgumentParser(description='ENAS')
 parser.add_argument('--search_for', default='macro', choices=['macro'])
 parser.add_argument('--data_path', default='/export/mlrg/terrance/Projects/data/', type=str)
 parser.add_argument('--output_filename', default='ENAS2', type=str)
+parser.add_argument('--resume', default='', type=str)
 parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--num_epochs', type=int, default=310)
 parser.add_argument('--log_every', type=int, default=50)
 parser.add_argument('--eval_every_epochs', type=int, default=1)
 parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--cutout', type=int, default=0)
+parser.add_argument('--fixed_arc', action='store_true', default=False)
 
 parser.add_argument('--child_num_layers', type=int, default=12)
 parser.add_argument('--child_out_filters', type=int, default=36)
@@ -59,8 +62,6 @@ vis = visdom.Visdom()
 vis.env = 'ENAS_' + args.output_filename
 vis_win = {'shared_cnn_acc': None, 'shared_cnn_loss': None, 'controller_reward': None,
            'controller_acc': None, 'controller_loss': None}
-
-sys.stdout = Logger(filename='logs/' + args.output_filename + '.log')
 
 
 def load_datasets():
@@ -106,38 +107,50 @@ def load_datasets():
     train_subset = Subset(train_dataset, train_indices)
     valid_subset = Subset(valid_dataset, valid_indices)
 
-    train_loader = torch.utils.data.DataLoader(dataset=train_subset,
-                                               batch_size=args.batch_size,
-                                               shuffle=True,
-                                               pin_memory=True,
-                                               num_workers=2)
+    data_loaders = {}
+    data_loaders['train_subset'] = torch.utils.data.DataLoader(dataset=train_subset,
+                                                               batch_size=args.batch_size,
+                                                               shuffle=True,
+                                                               pin_memory=True,
+                                                               num_workers=2)
 
-    valid_loader = torch.utils.data.DataLoader(dataset=valid_subset,
-                                               batch_size=args.batch_size,
-                                               shuffle=True,
-                                               pin_memory=True,
-                                               num_workers=2,
-                                               drop_last=True)
+    data_loaders['valid_subset'] = torch.utils.data.DataLoader(dataset=valid_subset,
+                                                               batch_size=args.batch_size,
+                                                               shuffle=True,
+                                                               pin_memory=True,
+                                                               num_workers=2,
+                                                               drop_last=True)
 
-    test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-                                              batch_size=args.batch_size,
-                                              shuffle=False,
-                                              pin_memory=True,
-                                              num_workers=2)
+    data_loaders['train_dataset'] = torch.utils.data.DataLoader(dataset=train_dataset,
+                                                                batch_size=args.batch_size,
+                                                                shuffle=True,
+                                                                pin_memory=True,
+                                                                num_workers=2)
 
-    return train_loader, valid_loader, test_loader
+    data_loaders['test_dataset'] = torch.utils.data.DataLoader(dataset=test_dataset,
+                                                               batch_size=args.batch_size,
+                                                               shuffle=False,
+                                                               pin_memory=True,
+                                                               num_workers=2)
+
+    return data_loaders
 
 
 def train_shared_cnn(epoch,
                      controller,
                      shared_cnn,
                      data_loaders,
-                     shared_cnn_optimizer):
+                     shared_cnn_optimizer,
+                     fixed_arc=None):
 
     global vis_win
 
     controller.eval()
-    train_loader, _, _ = data_loaders
+
+    if fixed_arc is None:
+        train_loader = data_loaders['train_subset']
+    else:
+        train_loader = data_loaders['train_dataset']
 
     train_acc_meter = AverageMeter()
     loss_meter = AverageMeter()
@@ -147,33 +160,13 @@ def train_shared_cnn(epoch,
         images = images.cuda()
         labels = labels.cuda()
 
-        with torch.no_grad():
-            controller()  # perform forward pass to generate a new architecture
+        if fixed_arc is None:
+            with torch.no_grad():
+                controller()  # perform forward pass to generate a new architecture
+            sample_arc = controller.sample_arc
+        else:
+            sample_arc = fixed_arc
 
-        sample_arc = controller.sample_arc
-
-        '''
-        # Test architecture
-        sample_arc = {}
-        arc = [
-        [4],
-        [3, 1],
-        [2, 0, 0],
-        [4, 1, 0, 1],
-        [0, 1, 1, 0, 1],
-        [1, 1, 1, 0, 1, 1],
-        [3, 1, 0, 1, 1, 1, 0],
-        [5, 0, 0, 0, 0, 0, 0, 0],
-        [5, 1, 0, 1, 1, 0, 0, 0, 0],
-        [4, 1, 1, 0, 0, 0, 1, 0, 1, 0],
-        [4, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1],
-        [4, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1]]
-        
-        for i in range(len(arc)):
-            sample_arc[str(i)] = [torch.tensor(arc[i][0]).cuda()]
-            if len(arc[i]) > 1:
-                sample_arc[str(i)].append(torch.tensor(arc[i][1:]).cuda())
-        '''
         shared_cnn.zero_grad()
         pred = shared_cnn(images, sample_arc)
         loss = nn.CrossEntropyLoss()(pred, labels)
@@ -230,7 +223,7 @@ def train_controller(epoch,
     global vis_win
 
     shared_cnn.eval()
-    _, valid_loader, _ = data_loaders
+    valid_loader = data_loaders['valid_subset']
 
     reward_meter = AverageMeter()
     baseline_meter = AverageMeter()
@@ -279,6 +272,7 @@ def train_controller(epoch,
 
         # Aggregate gradients for controller_num_aggregate iterationa, then update weights
         if (i + 1) % args.controller_num_aggregate == 0:
+            # TODO: Divide gradients by controller_num_aggregate to get the average gradient
             grad_norm = torch.nn.utils.clip_grad_norm_(controller.parameters(), args.child_grad_bound)
             controller_optimizer.step()
             controller.zero_grad()
@@ -320,32 +314,36 @@ def train_controller(epoch,
     return baseline
 
 
-def get_eval_accuracy(loader, shared_cnn, sample_arc):
-    total = 0.
-    acc_sum = 0.
-    for (images, labels) in loader:
-        images = images.cuda()
-        labels = labels.cuda()
-
-        pred = shared_cnn(images, sample_arc)
-        acc_sum += torch.sum((torch.max(pred, 1)[1] == labels).type(torch.float))
-        total += pred.shape[0]
-
-    acc = acc_sum / total
-    return acc.item()
-
-
 def evaluate_model(epoch, controller, shared_cnn, data_loaders, n_samples=10):
     controller.eval()
     shared_cnn.eval()
 
-    _, valid_loader, test_loader = data_loaders
+    print('Here are ' + str(n_samples) + ' architectures:')
+    best_arc, _ = get_best_arc(controller, shared_cnn, data_loaders, n_samples, verbose=True)
+
+    valid_loader = data_loaders['valid_subset']
+    test_loader = data_loaders['test_dataset']
+
+    valid_acc = get_eval_accuracy(valid_loader, shared_cnn, best_arc)
+    test_acc = get_eval_accuracy(test_loader, shared_cnn, best_arc)
+
+    print('Epoch ' + str(epoch) + ': Eval')
+    print('valid_accuracy: %.4f' % (valid_acc))
+    print('test_accuracy: %.4f' % (test_acc))
+
+    controller.train()
+    shared_cnn.train()
+
+
+def get_best_arc(controller, shared_cnn, data_loaders, n_samples=10, verbose=False):
+    controller.eval()
+    shared_cnn.eval()
+
+    valid_loader = data_loaders['valid_subset']
 
     images, labels = next(iter(valid_loader))
     images = images.cuda()
     labels = labels.cuda()
-
-    print('Here are ' + str(n_samples) + ' architectures:')
 
     arcs = []
     val_accs = []
@@ -360,22 +358,34 @@ def evaluate_model(epoch, controller, shared_cnn, data_loaders, n_samples=10):
         val_acc = torch.mean((torch.max(pred, 1)[1] == labels).type(torch.float))
         val_accs.append(val_acc.item())
 
-        print_arc(sample_arc)
-        print('val_acc=' + str(val_acc.item()))
-        print('-' * 80)
+        if verbose:
+            print_arc(sample_arc)
+            print('val_acc=' + str(val_acc.item()))
+            print('-' * 80)
 
     best_iter = np.argmax(val_accs)
     best_arc = arcs[best_iter]
-
-    valid_acc = get_eval_accuracy(valid_loader, shared_cnn, best_arc)
-    test_acc = get_eval_accuracy(test_loader, shared_cnn, best_arc)
-
-    print('Epoch ' + str(epoch) + ': Eval')
-    print('valid_accuracy: %.4f' % (valid_acc))
-    print('test_accuracy: %.4f' % (test_acc))
+    best_val_acc = val_accs[best_iter]
 
     controller.train()
     shared_cnn.train()
+    return best_arc, best_val_acc
+
+
+def get_eval_accuracy(loader, shared_cnn, sample_arc):
+    total = 0.
+    acc_sum = 0.
+    for (images, labels) in loader:
+        images = images.cuda()
+        labels = labels.cuda()
+
+        with torch.no_grad():
+            pred = shared_cnn(images, sample_arc)
+        acc_sum += torch.sum((torch.max(pred, 1)[1] == labels).type(torch.float))
+        total += pred.shape[0]
+
+    acc = acc_sum / total
+    return acc.item()
 
 
 def print_arc(sample_arc):
@@ -389,9 +399,109 @@ def print_arc(sample_arc):
             print('[' + ' '.join(str(n) for n in (branch_type + skips)) + ']')
 
 
+def train_enas(start_epoch,
+               controller,
+               shared_cnn,
+               data_loaders,
+               shared_cnn_optimizer,
+               controller_optimizer,
+               shared_cnn_scheduler):
+
+    baseline = None
+    for epoch in range(start_epoch, args.num_epochs):
+
+        train_shared_cnn(epoch,
+                         controller,
+                         shared_cnn,
+                         data_loaders,
+                         shared_cnn_optimizer)
+
+        baseline = train_controller(epoch,
+                                    controller,
+                                    shared_cnn,
+                                    data_loaders,
+                                    controller_optimizer,
+                                    baseline)
+
+        if epoch % args.eval_every_epochs == 0:
+            evaluate_model(epoch, controller, shared_cnn, data_loaders)
+
+        shared_cnn_scheduler.step(epoch)
+
+        state = {'epoch': epoch + 1,
+                 'args': args,
+                 'shared_cnn_state_dict': shared_cnn.state_dict(),
+                 'controller_state_dict': controller.state_dict(),
+                 'shared_cnn_optimizer': shared_cnn_optimizer.state_dict(),
+                 'controller_optimizer': controller_optimizer.state_dict()}
+        filename = 'checkpoints/' + args.output_filename + '.pth.tar'
+        torch.save(state, filename)
+
+
+def train_fixed(start_epoch,
+                controller,
+                shared_cnn,
+                data_loaders):
+
+    best_arc, best_val_acc = get_best_arc(controller, shared_cnn, data_loaders, n_samples=10, verbose=False)
+    print('Best architecture:')
+    print_arc(best_arc)
+    print('Validation accuracy: ' + str(best_val_acc))
+
+    fixed_cnn = SharedCNN(num_layers=args.child_num_layers,
+                          num_branches=args.child_num_branches,
+                          out_filters=512 // 4,  # args.child_out_filters
+                          keep_prob=args.child_keep_prob,
+                          fixed_arc=best_arc)
+    fixed_cnn = fixed_cnn.cuda()
+
+    fixed_cnn_optimizer = torch.optim.SGD(params=fixed_cnn.parameters(),
+                                          lr=args.child_lr_max,
+                                          momentum=0.9,
+                                          nesterov=True,
+                                          weight_decay=args.child_l2_reg)
+
+    fixed_cnn_scheduler = CosineAnnealingLR(optimizer=fixed_cnn_optimizer,
+                                            T_max=args.child_lr_T,
+                                            eta_min=args.child_lr_min)
+
+    test_loader = data_loaders['test_dataset']
+
+    for epoch in range(args.num_epochs):
+
+        train_shared_cnn(epoch,
+                         controller,  # not actually used in training the fixed_cnn
+                         fixed_cnn,
+                         data_loaders,
+                         fixed_cnn_optimizer,
+                         best_arc)
+
+        if epoch % args.eval_every_epochs == 0:
+            test_acc = get_eval_accuracy(test_loader, fixed_cnn, best_arc)
+            print('Epoch ' + str(epoch) + ': Eval')
+            print('test_accuracy: %.4f' % (test_acc))
+
+        fixed_cnn_scheduler.step(epoch)
+
+        state = {'epoch': epoch + 1,
+                 'args': args,
+                 'best_arc': best_arc,
+                 'fixed_cnn_state_dict': shared_cnn.state_dict(),
+                 'fixed_cnn_optimizer': fixed_cnn_optimizer.state_dict()}
+        filename = 'checkpoints/' + args.output_filename + '_fixed.pth.tar'
+        torch.save(state, filename)
+
+
 def main():
+    global args
+
     np.random.seed(args.seed)
     torch.cuda.manual_seed(args.seed)
+
+    if args.fixed_arc:
+        sys.stdout = Logger(filename='logs/' + args.output_filename + '_fixed.log')
+    else:
+        sys.stdout = Logger(filename='logs/' + args.output_filename + '.log')
 
     print(args)
 
@@ -429,42 +539,43 @@ def main():
                                            nesterov=True,
                                            weight_decay=args.child_l2_reg)
 
-    # PyTorch has slightly different implementation than TensorFlow
     # https://github.com/melodyguan/enas/blob/master/src/utils.py#L154
-    # https://pytorch.org/docs/master/optim.html#torch.optim.lr_scheduler.CosineAnnealingLR
     shared_cnn_scheduler = CosineAnnealingLR(optimizer=shared_cnn_optimizer,
                                              T_max=args.child_lr_T,
                                              eta_min=args.child_lr_min)
 
-    baseline = None
-    for epoch in range(args.num_epochs):
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print("Loading checkpoint '{}'".format(args.resume))
+            checkpoint = torch.load(args.resume)
+            start_epoch = checkpoint['epoch']
+            # args = checkpoint['args']
+            shared_cnn.load_state_dict(checkpoint['shared_cnn_state_dict'])
+            controller.load_state_dict(checkpoint['controller_state_dict'])
+            shared_cnn_optimizer.load_state_dict(checkpoint['shared_cnn_optimizer'])
+            controller_optimizer.load_state_dict(checkpoint['controller_optimizer'])
+            shared_cnn_scheduler.optimizer = shared_cnn_optimizer  # Not sure if this actually works
+            print("Loaded checkpoint '{}' (epoch {})"
+                  .format(args.resume, checkpoint['epoch']))
+        else:
+            raise ValueError("No checkpoint found at '{}'".format(args.resume))
+    else:
+        start_epoch = 0
 
-        train_shared_cnn(epoch,
-                         controller,
-                         shared_cnn,
-                         data_loaders,
-                         shared_cnn_optimizer)
-
-        baseline = train_controller(epoch,
-                                    controller,
-                                    shared_cnn,
-                                    data_loaders,
-                                    controller_optimizer,
-                                    baseline)
-
-        if epoch % args.eval_every_epochs == 0:
-            evaluate_model(epoch, controller, shared_cnn, data_loaders)
-
-        shared_cnn_scheduler.step(epoch)
-
-        state = {'epoch': epoch + 1,
-                 'args': args,
-                 'shared_cnn_state_dict': shared_cnn.state_dict(),
-                 'controller_state_dict': controller.state_dict(),
-                 'shared_cnn_optimizer': shared_cnn_optimizer.state_dict(),
-                 'controller_optimizer': controller_optimizer.state_dict()}
-        filename = 'checkpoints/' + args.output_filename + '.pth.tar'
-        torch.save(state, filename)
+    if not args.fixed_arc:
+        train_enas(start_epoch,
+                   controller,
+                   shared_cnn,
+                   data_loaders,
+                   shared_cnn_optimizer,
+                   controller_optimizer,
+                   shared_cnn_scheduler)
+    else:
+        assert args.resume != '', 'A pretrained model should be used when training a fixed architecture.'
+        train_fixed(start_epoch,
+                    controller,
+                    shared_cnn,
+                    data_loaders)
 
 
 if __name__ == "__main__":

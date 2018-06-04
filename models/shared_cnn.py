@@ -112,6 +112,60 @@ class ENASLayer(nn.Module):
         return out
 
 
+class FixedLayer(nn.Module):
+    '''
+    https://github.com/melodyguan/enas/blob/master/src/cifar10/general_child.py#L245
+    '''
+    def __init__(self, layer_id, in_planes, out_planes, sample_arc):
+        super(FixedLayer, self).__init__()
+
+        self.layer_id = layer_id
+        self.in_planes = in_planes
+        self.out_planes = out_planes
+        self.sample_arc = sample_arc
+
+        self.layer_type = sample_arc[0]
+        if self.layer_id > 0:
+            self.skip_indices = sample_arc[1]
+        else:
+            self.skip_indices = torch.zeros(1)
+
+        if self.layer_type == 0:
+            self.branch = ConvBranch(in_planes, out_planes, kernel_size=3)
+        elif self.layer_type == 1:
+            self.branch = ConvBranch(in_planes, out_planes, kernel_size=3, separable=True)
+        elif self.layer_type == 2:
+            self.branch = ConvBranch(in_planes, out_planes, kernel_size=5)
+        elif self.layer_type == 3:
+            self.branch = ConvBranch(in_planes, out_planes, kernel_size=5, separable=True)
+        elif self.layer_type == 4:
+            self.branch = PoolBranch(in_planes, out_planes, 'avg')
+        elif self.layer_type == 5:
+            self.branch = PoolBranch(in_planes, out_planes, 'max')
+        else:
+            raise ValueError("Unknown layer_type {}".format(self.layer_type))
+
+        # Use concatentation instead of addition in the fixed layer for some reason
+        in_planes = int((torch.sum(self.skip_indices).item() + 1) * in_planes)
+        self.dim_reduc = nn.Sequential(
+            nn.Conv2d(in_planes, out_planes, kernel_size=1, bias=False),
+            nn.ReLU(),
+            nn.BatchNorm2d(out_planes, track_running_stats=False))
+
+    def forward(self, x, prev_layers, sample_arc):
+        out = self.branch(x)
+
+        res_layers = []
+        for i, skip in enumerate(self.skip_indices):
+            if skip == 1:
+                res_layers.append(prev_layers[i])
+        prev = res_layers + [out]
+        prev = torch.cat(prev, dim=1)
+
+        out = self.dim_reduc(prev)
+        return out
+
+
 class ConvBranch(nn.Module):
     '''
     https://github.com/melodyguan/enas/blob/master/src/cifar10/general_child.py#L483
@@ -179,7 +233,8 @@ class SharedCNN(nn.Module):
                  num_layers=12,        # how deep the network is
                  num_branches=6,       # number of options per layer
                  out_filters=24,       # number of output filters in each convolutional layer
-                 keep_prob=1.0         # dropout probability
+                 keep_prob=1.0,         # dropout probability
+                 fixed_arc=None
                  ):
 
         super(SharedCNN, self).__init__()
@@ -188,6 +243,7 @@ class SharedCNN(nn.Module):
         self.num_branches = num_branches
         self.out_filters = out_filters
         self.keep_prob = keep_prob
+        self.fixed_arc = fixed_arc
 
         pool_distance = self.num_layers // 3
         self.pool_layers = [pool_distance - 1, 2 * pool_distance - 1]
@@ -200,17 +256,20 @@ class SharedCNN(nn.Module):
         self.pooled_layers = nn.ModuleList([])
 
         for layer_id in range(self.num_layers):
-            layer = ENASLayer(layer_id, self.out_filters, self.out_filters)
+            if self.fixed_arc is None:
+                layer = ENASLayer(layer_id, self.out_filters, self.out_filters)
+            else:
+                layer = FixedLayer(layer_id, self.out_filters, self.out_filters, self.fixed_arc[str(layer_id)])
             self.layers.append(layer)
 
             if layer_id in self.pool_layers:
                 for i in range(len(self.layers)):
-                    self.pooled_layers.append(FactorizedReduction(self.out_filters, self.out_filters))
-                '''
-                # Use this for fixed architecture
-                    self.pooled_layers.append(FactorizedReduction(self.out_filters, self.out_filters * 2))
-                self.out_filters *= 2
-                '''
+                    if self.fixed_arc is None:
+                        self.pooled_layers.append(FactorizedReduction(self.out_filters, self.out_filters))
+                    else:
+                        self.pooled_layers.append(FactorizedReduction(self.out_filters, self.out_filters * 2))
+                if self.fixed_arc is not None:
+                    self.out_filters *= 2
 
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.dropout = nn.Dropout(p=1. - self.keep_prob)

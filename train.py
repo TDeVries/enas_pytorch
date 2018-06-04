@@ -9,12 +9,11 @@ from tqdm import tqdm, trange
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
-import torch.backends.cudnn as cudnn
 from torchvision import datasets, transforms
 from torch.utils.data.dataset import Subset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from utils.utils import CSVLogger, AverageMeter
+from utils.utils import CSVLogger, AverageMeter, Logger
 from utils.cutout import Cutout
 from models.controller import Controller
 from models.shared_cnn import SharedCNN
@@ -23,7 +22,7 @@ parser = argparse.ArgumentParser(description='ENAS')
 
 parser.add_argument('--search_for', default='macro', choices=['macro'])
 parser.add_argument('--data_path', default='/export/mlrg/terrance/Projects/data/', type=str)
-parser.add_argument('--output_filename', default='ENAS1', type=str)
+parser.add_argument('--output_filename', default='ENAS2', type=str)
 parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--num_epochs', type=int, default=310)
 parser.add_argument('--log_every', type=int, default=50)
@@ -61,8 +60,7 @@ vis.env = 'ENAS_' + args.output_filename
 vis_win = {'shared_cnn_acc': None, 'shared_cnn_loss': None, 'controller_reward': None,
            'controller_acc': None, 'controller_loss': None}
 
-# sys.stdout = open('logs/' + args.output_filename + '.log', 'w')
-# cudnn.benchmark = True  # TODO: test to see if this actually makes things go faster
+sys.stdout = Logger(filename='logs/' + args.output_filename + '.log')
 
 
 def load_datasets():
@@ -347,12 +345,13 @@ def evaluate_model(epoch, controller, shared_cnn, data_loaders, n_samples=10):
     images = images.cuda()
     labels = labels.cuda()
 
-    print('Here are 10 architectures:')
+    print('Here are ' + str(n_samples) + ' architectures:')
 
     arcs = []
     val_accs = []
     for i in range(n_samples):
-        controller()  # perform forward pass to generate a new architecture
+        with torch.no_grad():
+            controller()  # perform forward pass to generate a new architecture
         sample_arc = controller.sample_arc
         arcs.append(sample_arc)
 

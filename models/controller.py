@@ -52,15 +52,7 @@ class Controller(nn.Module):
             self.w_emb = nn.Embedding(self.num_branches, self.lstm_size)
             self.w_soft = nn.Linear(self.lstm_size, self.num_branches, bias=False)
         else:
-            self.w_emb = {"start": [], "count": []}
-            for branch_id in range(self.num_branches):
-                self.w_emb["start"].append(nn.Embedding(self.out_filters, self.lstm_size))
-                self.w_emb["count"].append(nn.Embedding(self.out_filters - 1, self.lstm_size))
-
-            self.w_soft = {"start": [], "count": []}
-            for branch_id in range(self.num_branches):
-                self.w_soft["start"].append(nn.Linear(self.lstm_size, self.out_filters, bias=False))
-                self.w_soft["count"].append(nn.Linear(self.lstm_size, self.out_filters - 1, bias=False))
+            assert False, "Not implemented error: search_whole_channels = False"
 
         self.w_attn_1 = nn.Linear(self.lstm_size, self.lstm_size, bias=False)
         self.w_attn_2 = nn.Linear(self.lstm_size, self.lstm_size, bias=False)

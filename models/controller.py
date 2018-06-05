@@ -3,8 +3,6 @@ import torch.nn as nn
 from torch.autograd import Variable
 from torch.distributions.categorical import Categorical
 
-import pdb
-
 
 class Controller(nn.Module):
     '''
@@ -44,9 +42,6 @@ class Controller(nn.Module):
         '''
         https://github.com/melodyguan/enas/blob/master/src/cifar10/general_controller.py#L83
         '''
-
-        # TODO: initialize LSTM weights with random uniform from -0.1 to 0.1
-        # https://github.com/melodyguan/enas/blob/master/src/cifar10/general_controller.py#L84
         self.w_lstm = nn.LSTM(input_size=self.lstm_size,
                               hidden_size=self.lstm_size,
                               num_layers=self.lstm_num_layers)
@@ -74,12 +69,9 @@ class Controller(nn.Module):
         self._reset_params()
 
     def _reset_params(self):
-        nn.init.uniform_(self.g_emb.weight, -0.1, 0.1)
-        nn.init.uniform_(self.w_emb.weight, -0.1, 0.1)
-        nn.init.uniform_(self.w_soft.weight, -0.1, 0.1)
-        nn.init.uniform_(self.w_attn_1.weight, -0.1, 0.1)
-        nn.init.uniform_(self.w_attn_2.weight, -0.1, 0.1)
-        nn.init.uniform_(self.v_attn.weight, -0.1, 0.1)
+        for m in self.modules():
+            if isinstance(m, nn.Linear) or isinstance(m, nn.Embedding):
+                nn.init.uniform_(m.weight, -0.1, 0.1)
 
         nn.init.uniform_(self.w_lstm.weight_hh_l0, -0.1, 0.1)
         nn.init.uniform_(self.w_lstm.weight_ih_l0, -0.1, 0.1)
@@ -88,25 +80,23 @@ class Controller(nn.Module):
         '''
         https://github.com/melodyguan/enas/blob/master/src/cifar10/general_controller.py#L126
         '''
-
         h0 = None  # setting h0 to None will initialize LSTM state with 0s
 
         anchors = []
         anchors_w_1 = []
 
-        #arc_seq = []
         arc_seq = {}
         entropys = []
         log_probs = []
         skip_count = []
         skip_penaltys = []
 
-        inputs = self.g_emb.weight   # size [1, 32] (batch, features)
+        inputs = self.g_emb.weight
         skip_targets = torch.tensor([1.0 - self.skip_target, self.skip_target]).cuda()
 
         for layer_id in range(self.num_layers):
             if self.search_whole_channels:
-                inputs = inputs.unsqueeze(0)  # size [1, 1, 32] (sequence, batch, features)
+                inputs = inputs.unsqueeze(0)
                 output, hn = self.w_lstm(inputs, h0)
                 output = output.squeeze(0)
                 h0 = hn
@@ -116,13 +106,10 @@ class Controller(nn.Module):
                     logit /= self.temperature
                 if self.tanh_constant is not None:
                     logit = self.tanh_constant * torch.tanh(logit)
-                if self.search_for == "macro" or self.search_for == "branch":
-                    branch_id_dist = Categorical(logits=logit)
-                    branch_id = branch_id_dist.sample()
-                elif self.search_for == "connection":
-                    branch_id = torch.tensor([0])
-                else:
-                    raise ValueError("Unknown search_for {}".format(self.search_for))
+
+                branch_id_dist = Categorical(logits=logit)
+                branch_id = branch_id_dist.sample()
+
                 arc_seq[str(layer_id)] = [branch_id]
 
                 log_prob = branch_id_dist.log_prob(branch_id)
@@ -133,7 +120,6 @@ class Controller(nn.Module):
                 inputs = self.w_emb(branch_id)
                 inputs = inputs.unsqueeze(0)
             else:
-                # TODO: implement this branch
                 # https://github.com/melodyguan/enas/blob/master/src/cifar10/general_controller.py#L171
                 assert False, "Not implemented error: search_whole_channels = False"
 
@@ -153,6 +139,7 @@ class Controller(nn.Module):
                 skip_dist = Categorical(logits=logit)
                 skip = skip_dist.sample()
                 skip = skip.view(layer_id)
+
                 arc_seq[str(layer_id)].append(skip)
 
                 skip_prob = torch.sigmoid(logit)

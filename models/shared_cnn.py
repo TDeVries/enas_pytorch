@@ -7,7 +7,8 @@ from torch.autograd import Variable
 '''
 Implementation Notes:
 -Setting track_running_stats to True in BatchNorm layers seems to hurt validation
-    performance, perhaps because it does not see enough examples during training
+    and test performance for some reason, so here it is disabled even though it
+    is used in the official implementation.
 '''
 
 
@@ -80,9 +81,6 @@ class ENASLayer(nn.Module):
         self.bn = nn.BatchNorm2d(out_planes, track_running_stats=False)
 
     def forward(self, x, prev_layers, sample_arc):
-        # sample_arc is a list, where the first value is for the layer type
-        #   and the remaining values indicate whether skip connects occur
-
         layer_type = sample_arc[0]
         if self.layer_id > 0:
             skip_indices = sample_arc[1]
@@ -230,13 +228,12 @@ class PoolBranch(nn.Module):
 
 class SharedCNN(nn.Module):
     def __init__(self,
-                 num_layers=12,        # how deep the network is
-                 num_branches=6,       # number of options per layer
-                 out_filters=24,       # number of output filters in each convolutional layer
-                 keep_prob=1.0,         # dropout probability
+                 num_layers=12,
+                 num_branches=6,
+                 out_filters=24,
+                 keep_prob=1.0,
                  fixed_arc=None
                  ):
-
         super(SharedCNN, self).__init__()
 
         self.num_layers = num_layers

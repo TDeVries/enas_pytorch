@@ -3,7 +3,7 @@ import numpy as np
 
 
 class Cutout(object):
-    """Randomly mask out one or more patches from an image.
+    """Randomly mask out a patche from an image.
 
     Args:
         length (int): The length (in pixels) of each square patch.

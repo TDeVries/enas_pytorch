@@ -1,11 +1,9 @@
-import pdb
 import os
 import sys
 import time
 import visdom
 import argparse
 import numpy as np
-from tqdm import tqdm, trange
 
 import torch
 import torch.nn as nn
@@ -14,16 +12,16 @@ from torchvision import datasets, transforms
 from torch.utils.data.dataset import Subset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from utils.utils import CSVLogger, AverageMeter, Logger
-from utils.cutout import Cutout
 from models.controller import Controller
 from models.shared_cnn import SharedCNN
+from utils.utils import AverageMeter, Logger
+from utils.cutout import Cutout
 
 parser = argparse.ArgumentParser(description='ENAS')
 
 parser.add_argument('--search_for', default='macro', choices=['macro'])
 parser.add_argument('--data_path', default='/export/mlrg/terrance/Projects/data/', type=str)
-parser.add_argument('--output_filename', default='ENAS2', type=str)
+parser.add_argument('--output_filename', default='ENAS', type=str)
 parser.add_argument('--resume', default='', type=str)
 parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--num_epochs', type=int, default=310)
@@ -65,6 +63,10 @@ vis_win = {'shared_cnn_acc': None, 'shared_cnn_loss': None, 'controller_reward':
 
 
 def load_datasets():
+    """Create data loaders for the CIFAR-10 dataset.
+
+    Returns: Dict containing data loaders.
+    """
     normalize = transforms.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]],
                                      std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
 
@@ -142,14 +144,28 @@ def train_shared_cnn(epoch,
                      data_loaders,
                      shared_cnn_optimizer,
                      fixed_arc=None):
+    """Train shared_cnn by sampling architectures from the controller.
 
+    Args:
+        epoch: Current epoch.
+        controller: Controller module that generates architectures to be trained.
+        shared_cnn: CNN that contains all possible architectures, with shared weights.
+        data_loaders: Dict containing data loaders.
+        shared_cnn_optimizer: Optimizer for the shared_cnn.
+        fixed_arc: Architecture to train, overrides the controller sample
+        ...
+    
+    Returns: Nothing.
+    """
     global vis_win
 
     controller.eval()
 
     if fixed_arc is None:
+        # Use a subset of the training set when searching for an arhcitecture
         train_loader = data_loaders['train_subset']
     else:
+        # Use the full training set when training a fixed architecture
         train_loader = data_loaders['train_dataset']
 
     train_acc_meter = AverageMeter()
@@ -215,9 +231,28 @@ def train_controller(epoch,
                      data_loaders,
                      controller_optimizer,
                      baseline=None):
-    '''
+    """Train controller to optimizer validation accuracy using REINFORCE.
+
+    Args:
+        epoch: Current epoch.
+        controller: Controller module that generates architectures to be trained.
+        shared_cnn: CNN that contains all possible architectures, with shared weights.
+        data_loaders: Dict containing data loaders.
+        controller_optimizer: Optimizer for the controller.
+        baseline: The baseline score (i.e. average val_acc) from the previous epoch
+    
+    Returns: 
+        baseline: The baseline score (i.e. average val_acc) for the current epoch
+
+    For more stable training we perform weight updates using the average of
+    many gradient estimates. controller_num_aggregate indicates how many samples
+    we want to average over (default = 20). By default PyTorch will sum gradients
+    each time .backward() is called (as long as an optimizer step is not taken),
+    so each iteration we divide the loss by controller_num_aggregate to get the 
+    average.
+
     https://github.com/melodyguan/enas/blob/master/src/cifar10/general_controller.py#L270
-    '''
+    """
     print('Epoch ' + str(epoch) + ': Training controller')
 
     global vis_win
@@ -242,37 +277,38 @@ def train_controller(epoch,
 
         with torch.no_grad():
             pred = shared_cnn(images, sample_arc)
-        batch_val_acc = torch.mean((torch.max(pred, 1)[1] == labels).type(torch.float))
+        val_acc = torch.mean((torch.max(pred, 1)[1] == labels).type(torch.float))
 
-        reward = torch.tensor(batch_val_acc.detach())  # make sure that gradients aren't backpropped through the reward
+        # detach to make sure that gradients aren't backpropped through the reward
+        reward = torch.tensor(val_acc.detach())
         reward += args.controller_entropy_weight * controller.sample_entropy
 
-        sample_log_prob = controller.sample_log_prob
-
         if baseline is None:
-            baseline = batch_val_acc
+            baseline = val_acc
         else:
             baseline -= (1 - args.controller_bl_dec) * (baseline - reward)
-            baseline = baseline.detach()  # to make sure that gradients are not backpropped through the baseline
+            # detach to make sure that gradients are not backpropped through the baseline
+            baseline = baseline.detach()
 
-        # Might need to multiply by -1
-        loss = -1 * sample_log_prob * (reward - baseline)
+        loss = -1 * controller.sample_log_prob * (reward - baseline)
 
         if args.controller_skip_weight is not None:
             loss += args.controller_skip_weight * controller.skip_penaltys
 
-        loss.backward(retain_graph=True)
-
         reward_meter.update(reward.item())
         baseline_meter.update(baseline.item())
-        val_acc_meter.update(batch_val_acc.item())
+        val_acc_meter.update(val_acc.item())
         loss_meter.update(loss.item())
+
+        # Average gradient over controller_num_aggregate samples
+        loss = loss / args.controller_num_aggregate
+
+        loss.backward(retain_graph=True)
 
         end = time.time()
 
         # Aggregate gradients for controller_num_aggregate iterationa, then update weights
         if (i + 1) % args.controller_num_aggregate == 0:
-            # TODO: Divide gradients by controller_num_aggregate to get the average gradient
             grad_norm = torch.nn.utils.clip_grad_norm_(controller.parameters(), args.child_grad_bound)
             controller_optimizer.step()
             controller.zero_grad()
@@ -315,6 +351,18 @@ def train_controller(epoch,
 
 
 def evaluate_model(epoch, controller, shared_cnn, data_loaders, n_samples=10):
+    """Print the validation and test accuracy for a controller and shared_cnn.
+
+    Args:
+        epoch: Current epoch.
+        controller: Controller module that generates architectures to be trained.
+        shared_cnn: CNN that contains all possible architectures, with shared weights.
+        data_loaders: Dict containing data loaders.
+        n_samples: Number of architectures to test when looking for the best one.
+    
+    Returns: Nothing.
+    """
+
     controller.eval()
     shared_cnn.eval()
 
@@ -336,6 +384,22 @@ def evaluate_model(epoch, controller, shared_cnn, data_loaders, n_samples=10):
 
 
 def get_best_arc(controller, shared_cnn, data_loaders, n_samples=10, verbose=False):
+    """Evaluate several architectures and return the best performing one.
+
+    Args:
+        controller: Controller module that generates architectures to be trained.
+        shared_cnn: CNN that contains all possible architectures, with shared weights.
+        data_loaders: Dict containing data loaders.
+        n_samples: Number of architectures to test when looking for the best one.
+        verbose: If True, display the architecture and resulting validation accuracy.
+    
+    Returns:
+        best_arc: The best performing architecture.
+        best_vall_acc: Accuracy achieved on the best performing architecture.
+
+    All architectures are evaluated on the same minibatch from the validation set.
+    """
+
     controller.eval()
     shared_cnn.eval()
 
@@ -373,6 +437,16 @@ def get_best_arc(controller, shared_cnn, data_loaders, n_samples=10, verbose=Fal
 
 
 def get_eval_accuracy(loader, shared_cnn, sample_arc):
+    """Evaluate a given architecture.
+
+    Args:
+        loader: A single data loader.
+        shared_cnn: CNN that contains all possible architectures, with shared weights.
+        sample_arc: The architecture to use for the evaluation.
+    
+    Returns:
+        acc: Average accuracy.
+    """
     total = 0.
     acc_sum = 0.
     for (images, labels) in loader:
@@ -389,6 +463,13 @@ def get_eval_accuracy(loader, shared_cnn, sample_arc):
 
 
 def print_arc(sample_arc):
+    """Display a sample architecture in a readable format.
+    
+    Args: 
+        sample_arc: The architecture to display.
+
+    Returns: Nothing.
+    """
     for key, value in sample_arc.items():
         if len(value) == 1:
             branch_type = value[0].cpu().numpy().tolist()
@@ -406,6 +487,19 @@ def train_enas(start_epoch,
                shared_cnn_optimizer,
                controller_optimizer,
                shared_cnn_scheduler):
+    """Perform architecture search by training a controller and shared_cnn.
+
+    Args:
+        start_epoch: Epoch to begin on.
+        controller: Controller module that generates architectures to be trained.
+        shared_cnn: CNN that contains all possible architectures, with shared weights.
+        data_loaders: Dict containing data loaders.
+        shared_cnn_optimizer: Optimizer for the shared_cnn.
+        controller_optimizer: Optimizer for the controller.
+        shared_cnn_scheduler: Learning rate schedular for shared_cnn_optimizer
+    
+    Returns: Nothing.
+    """
 
     baseline = None
     for epoch in range(start_epoch, args.num_epochs):
@@ -442,8 +536,23 @@ def train_fixed(start_epoch,
                 controller,
                 shared_cnn,
                 data_loaders):
+    """Train a fixed cnn architecture.
 
-    best_arc, best_val_acc = get_best_arc(controller, shared_cnn, data_loaders, n_samples=10, verbose=False)
+    Args:
+        start_epoch: Epoch to begin on.
+        controller: Controller module that generates architectures to be trained.
+        shared_cnn: CNN that contains all possible architectures, with shared weights.
+        data_loaders: Dict containing data loaders.
+    
+    Returns: Nothing.
+
+    Given a fully trained controller and shared_cnn, we sample many architectures,
+    and then train a new cnn from scratch using the best architecture we found. 
+    We change the number of filters in the new cnn such that the final layer 
+    has 512 channels.
+    """
+
+    best_arc, best_val_acc = get_best_arc(controller, shared_cnn, data_loaders, n_samples=100, verbose=False)
     print('Best architecture:')
     print_arc(best_arc)
     print('Validation accuracy: ' + str(best_val_acc))

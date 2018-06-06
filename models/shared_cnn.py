@@ -1,4 +1,3 @@
-import pdb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -164,6 +163,20 @@ class FixedLayer(nn.Module):
         return out
 
 
+class SeparableConv(nn.Module):
+    def __init__(self, in_planes, out_planes, kernel_size, bias):
+        super(SeparableConv, self).__init__()
+        padding = (kernel_size - 1) // 2
+        self.depthwise = nn.Conv2d(in_planes, in_planes, kernel_size=kernel_size,
+                                   padding=padding, groups=in_planes, bias=bias)
+        self.pointwise = nn.Conv2d(in_planes, out_planes, kernel_size=1, bias=bias)
+
+    def forward(self, x):
+        out = self.depthwise(x)
+        out = self.pointwise(out)
+        return out
+
+
 class ConvBranch(nn.Module):
     '''
     https://github.com/melodyguan/enas/blob/master/src/cifar10/general_child.py#L483
@@ -177,19 +190,23 @@ class ConvBranch(nn.Module):
         self.kernel_size = kernel_size
         self.separable = separable
 
-        self.padding = (kernel_size - 1) // 2
-        self.groups = in_planes if separable else 1
-
         self.inp_conv1 = nn.Sequential(
             nn.Conv2d(in_planes, out_planes, kernel_size=1, bias=False),
             nn.BatchNorm2d(out_planes, track_running_stats=False),
             nn.ReLU())
 
-        self.out_conv = nn.Sequential(
-            nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size,
-                      padding=self.padding, groups=self.groups, bias=False),
-            nn.BatchNorm2d(out_planes, track_running_stats=False),
-            nn.ReLU())
+        if separable:
+            self.out_conv = nn.Sequential(
+                SeparableConv(in_planes, out_planes, kernel_size=kernel_size, bias=False),
+                nn.BatchNorm2d(out_planes, track_running_stats=False),
+                nn.ReLU())
+        else:
+            padding = (kernel_size - 1) // 2
+            self.out_conv = nn.Sequential(
+                nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size,
+                          padding=padding, bias=False),
+                nn.BatchNorm2d(out_planes, track_running_stats=False),
+                nn.ReLU())
 
     def forward(self, x):
         out = self.inp_conv1(x)
